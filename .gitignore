@@ -1,0 +1,4 @@
+NetBank/weights/*
+data/*
+models/
+__pycache__/

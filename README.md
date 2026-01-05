@@ -10,6 +10,10 @@ sensors.
 The codebase will be progressively released to support full reproducibility of
 all experiments reported in the paper.
 
+Setup
+-----
+cd kernels/selective_scan && pip install -e .
+
 
 Planned Release
 ---------------
