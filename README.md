@@ -18,6 +18,9 @@ Please install the following dependencies:
 - chumpy  
 - open3d  
 - pybullet  
+- einops
+- timm
+- fvcore
 - qpsolvers  
 - numpy-quaternion  
 - vctoolkit==0.1.5.39  
