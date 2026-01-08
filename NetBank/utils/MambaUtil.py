@@ -117,79 +117,6 @@ class  VanilaMambaSelectAttenPatchWithLayerOutput(nn.Module):
         
         return x, fineXs, trendXs
 
-    def soft_select_frame(self, x):
-        k=20
-        
-        b, f, n, d = x.shape
-        select = self.select_head(x.view(b,f,-1)) # 【b,f,2】
-
-        select = F.gumbel_softmax(select, dim=-1, hard=False)
-        select_probs = select[:,:,1] # [b,f]
-        
-        entropy = -(select_probs * torch.log(select_probs + 1e-8) +
-                    (1 - select_probs) * torch.log(1 - select_probs + 1e-8))#.mean()
-        topK_loss = torch.clamp(select_probs - k,min=0)**2
-        
-        return select_probs, topK_loss
-    
-    def select_frame(self, x, k=3, temperature=1.0, drop_prob=0, entropy_reg=0.01):
-        b, f, n, d = x.shape
-        select = self.select_head(x.view(b, f, -1))  # [b, f, 2]
-
-        # gumbel softmax
-        select = F.gumbel_softmax(select / temperature, dim=-1, hard=False)  # [b, f, 2]
-        select_probs = select[:, :, 1]  # [b, f]
-
-        # ----- 熵正则化 (encourage diversity) -----
-        # 熵 = -sum(p log p)，这里我们加一个loss term，可以在 forward 外返回
-        entropy = -(select_probs * torch.log(select_probs + 1e-8) +
-                    (1 - select_probs) * torch.log(1 - select_probs + 1e-8))#.mean()
-
-        # top-k
-        _, select_idx = torch.topk(select_probs, k, dim=1)  # [B, k]
-
-        # ----- dropout on selected indices -----
-        # if self.training and drop_prob > 0:
-        #     mask = (torch.rand_like(select_idx.float()) > drop_prob).long()
-        #     # 没选中的地方就回退成随机帧
-        #     random_idx = torch.randint(0, f, select_idx.shape, device=select_idx.device)
-        #     select_idx = mask * select_idx + (1 - mask) * random_idx
-        if self.training and drop_prob > 0:
-            mask = (torch.rand_like(select_idx.float()) > drop_prob)
-            select_idx = select_idx * mask + (-1) * (~mask)  # -1 表示无效
-        # 返回选择结果和熵正则
-        select_idx[:,0]=197
-        select_idx[:,1]=198
-        select_idx[:,2]=199
-        return select_idx, entropy
-    
-    def atten_make_query(self, chosen_frames, last_frame, mask_valid=None, attn_drop=0, out_drop=0):
-        K = self.k_Project(chosen_frames)   # [B, k, n, d_k]
-        V = self.v_Project(chosen_frames)   # [B, k, n, d_v]
-        _, _, _, d_k = K.shape
-
-        # last_frame -> Q
-        Q = self.q_Project(last_frame)  # [B, 1, n, d_q]
-
-        # attention scores
-        attn_scores = torch.einsum('bqnd,bknd->bqkn', Q, K) / math.sqrt(d_k)
-        
-        # if mask_valid is not None:
-        #     attn_scores = attn_scores.masked_fill(
-        #         ~mask_valid.unsqueeze(1).unsqueeze(-1),
-        #         -1e9
-        #     )
-        mask_valid=mask_valid.unsqueeze(-1).unsqueeze(1)  # [B, 1, k, 1]
-        attn_scores = attn_scores + (1 - mask_valid) * (-1e9)
-        attn_probs = torch.softmax(attn_scores, dim=-2)  # softmax over k
-        attn_probs = F.dropout(attn_probs, p=attn_drop, training=self.training)
-
-        query_out = torch.einsum('bqkn,bknd->bqnd', attn_probs, V)  # [B, 1, n, d_v]
-        query_out = F.dropout(query_out, p=out_drop, training=self.training)
-
-        query_out = self.queryNorm(query_out + Q)
-        return query_out
-    
     def make_query(self, chosen_frames, last_frame, mask_valid=None, attn_drop=0, out_drop=0):
         K = self.k_Project(chosen_frames)   # [B, k, n, d_k]
         # V = self.v_Project(chosen_frames)   # [B, k, n, d_v]
@@ -215,7 +142,6 @@ class  VanilaMambaSelectAttenPatchWithLayerOutput(nn.Module):
         x=xT
         
         x, fineXs, trendXs = self.ST_foward(x)
-        # select, entropy = self.select_frame(x)
         y = self.head(x)
         y = y.view(b, f, n, -1)
         fineXs.insert(0, fineX)

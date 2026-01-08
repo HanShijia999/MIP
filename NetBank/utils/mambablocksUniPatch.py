@@ -21,15 +21,12 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = True
 
 try:
-    from .csms6s import CrossScan, CrossMerge,CrossScan_plus_poselimbs, CrossMerge_plus_poselimbs,CrossMerge_plus_uni,CrossScan_plus_uni
-    from .csms6s import SelectiveScanMamba, SelectiveScanCore, SelectiveScanOflex
+    from .csms6s import CrossScan, CrossMerge,CrossScan_basic, CrossMerge_basic,CrossMerge_plus_uni,CrossScan_plus_uni
+    from .csms6s import SelectiveScanCore
 except:
-    from csm_triton import CrossScanTriton, CrossMergeTriton, CrossScanTriton1b1, getCSM
-    from csm_triton import CrossScanTritonF, CrossMergeTritonF, CrossScanTriton1b1F
+
     from csms6s import CrossScan, CrossMerge
-    from csms6s import CrossScan_Ab_1direction, CrossMerge_Ab_1direction, CrossScan_Ab_2direction, CrossMerge_Ab_2direction
-    from csms6s import SelectiveScanMamba, SelectiveScanCore, SelectiveScanOflex
-    from csms6s import flops_selective_scan_fn, flops_selective_scan_ref, selective_scan_flop_jit
+    from csms6s import SelectiveScanCore
 
 # =====================================================
 # we have this class as linear and conv init differ from each other
@@ -310,7 +307,7 @@ class BiSTSSM_v2:
 
         # forward_type debug =======================================
         FORWARD_TYPES = dict(
-            v2_plus_poselimbs=partial(self.forward_corev2, force_fp32=(not self.disable_force32), CrossScan=CrossScan_plus_poselimbs, SelectiveScan=SelectiveScanCore, CrossMerge=CrossMerge_plus_poselimbs),
+            v2_plus_poselimbs=partial(self.forward_corev2, force_fp32=(not self.disable_force32), CrossScan=CrossScan_basic, SelectiveScan=SelectiveScanCore, CrossMerge=CrossMerge_basic),
             v2_uniDirection=partial(self.forward_corev2, force_fp32=(not self.disable_force32), CrossScan=CrossScan_plus_uni, SelectiveScan=SelectiveScanCore, CrossMerge=CrossMerge_plus_uni),
             )
         self.forward_core = FORWARD_TYPES.get(forward_type, None)

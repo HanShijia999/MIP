@@ -1,7 +1,7 @@
 import torch
 import tqdm
 import articulate as art
-from net import PNPVanilaMambaUniSelect
+from net import DuMambaUniSelect
 
 
 device= torch.device('cuda:0')  # Force CPU for testing
@@ -40,7 +40,7 @@ def compare_realimu(data, dataset_name='', evaluate_pose=True):
     full_pose_evaluator = FullPoseEvaluator()
     g = torch.tensor([0, -9.8, 0])
     batch_nets={
-        'distill_select2':PNPVanilaMambaUniSelect(device=device, mamba_weight= 'best_distill_select2.pt').eval().to(device),
+        'MIP':DuMambaUniSelect(device=device, mamba_weight= 'best_distill_select2.pt').eval().to(device),
     }
     pose_errors = {k: [] for k in batch_nets.keys()}
     for k in batch_nets:

@@ -27,20 +27,20 @@ class NumericalDifferentiation:
         return d
 
 
-from NetBank.VanilaMamba import VanilaMambaNetSelectUni
-class PNPVanilaMambaUniSelect(torch.nn.Module):
-    name = 'PNPVanilaMambaUniSelect'
+from NetBank.VanilaMamba import MambaNetSelectUni
+class DuMambaUniSelect(torch.nn.Module):
+    name = 'MIP'
     vi_mask = torch.tensor([1961, 5424, 1176, 4662, 411, 3021])
     ji_reduced = [1, 2, 3, 4, 5, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19]
     ji_ignored = [0, 7, 8, 10, 11, 20, 21, 22, 23]
 
     def __init__(self, cheat=None, weight_file='weights.pt',mamba_weight='best_weights.pt',device='cpu'):
-        super(PNPVanilaMambaUniSelect, self).__init__()
+        super(DuMambaUniSelect, self).__init__()
         self.device = device
         self.cheat=cheat
 
         self.num_frame = 200
-        self.model = VanilaMambaNetSelectUni()
+        self.model = MambaNetSelectUni()
         
         self.iknet_net1 = RNN(input_linear=False,
                               input_size=45 + 15,

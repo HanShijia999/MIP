@@ -1,11 +1,11 @@
 import torch
 from math import sqrt
-from .utils.PoseMambaUtil import *
+from .utils.MambaUtil import *
 
-class VanilaMambaNetSelectUni(torch.nn.Module):
+class MambaNetSelectUni(torch.nn.Module):
 
     def __init__(self,):
-        super(VanilaMambaNetSelectUni, self).__init__()
+        super(MambaNetSelectUni, self).__init__()
         self.num_frame=200
         
         self.model = VanilaMambaSelectAttenPatchWithLayerOutput(num_frame=self.num_frame, 
