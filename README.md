@@ -97,9 +97,9 @@ data/test_datasets/dipimu.pt
 # Planned Release
 ---------------
 
-[✅] Basic runable code
-[✅] Pretrained models and demo scripts
-[ ] Extra visualization tools  
+- [✅] Basic runable code
+- [✅] Pretrained models and demo scripts
+- [ ] Extra visualization tools  
 
 
 Contact
