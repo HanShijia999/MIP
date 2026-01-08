@@ -73,16 +73,10 @@ models/plane.urdf
 
 ## Download Pretrained Models
 
-- Student model: download from [here](https://github.com/HanShijia999/MIP/releases/download/V1.0.0/best_distill_select2.pt)  
+- Student model: download from [here](https://github.com/HanShijia999/MIP/releases/download/V1.0.0/dipimu.pt)  
   Place to:
   ```bash
-  NetBank/weights/best_distill_select2.pt
-  ```
-
-- Pretrained PNP weights: download from [here](https://github.com/HanShijia999/MIP/releases/download/V1.0.0/weights.pt)  
-  Place to:
-  ```bash
-  data/weights/PNP/weights.pt
+  data/weights/MIP_weights.pt
   ```
 
 ---
@@ -103,10 +97,9 @@ data/test_datasets/dipimu.pt
 # Planned Release
 ---------------
 
-[◌] Dual-Temporal Mamba backbone and PQN modules  
-[◌] Pretrained models and demo scripts  
-[ ] Training and distillation code  
-[ ] Evaluation and visualization tools  
+[✅] Basic runable code
+[✅] Pretrained models and demo scripts
+[ ] Extra visualization tools  
 
 
 Contact

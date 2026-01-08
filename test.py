@@ -40,7 +40,7 @@ def compare_realimu(data, dataset_name='', evaluate_pose=True):
     full_pose_evaluator = FullPoseEvaluator()
     g = torch.tensor([0, -9.8, 0])
     batch_nets={
-        'MIP':DuMambaUniSelect(device=device, mamba_weight= 'best_distill_select2.pt').eval().to(device),
+        'MIP':DuMambaUniSelect(device=device).eval().to(device),
     }
     pose_errors = {k: [] for k in batch_nets.keys()}
     for k in batch_nets:

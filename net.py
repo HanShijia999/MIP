@@ -34,7 +34,7 @@ class DuMambaUniSelect(torch.nn.Module):
     ji_reduced = [1, 2, 3, 4, 5, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19]
     ji_ignored = [0, 7, 8, 10, 11, 20, 21, 22, 23]
 
-    def __init__(self, cheat=None, weight_file='weights.pt',mamba_weight='best_weights.pt',device='cpu'):
+    def __init__(self, cheat=None, weight_file='MIP_weights.pt',device='cpu'):
         super(DuMambaUniSelect, self).__init__()
         self.device = device
         self.cheat=cheat
@@ -68,8 +68,9 @@ class DuMambaUniSelect(torch.nn.Module):
                               dropout=0.4)
 
 
-        self.to(self.device).load_state_dict(torch.load('data/weights/PNP/'+weight_file, map_location=self.device),strict=False)
-        self.model.load_state_dict(torch.load('NetBank/weights/'+mamba_weight,map_location=self.device), strict=False)
+        ckpt = torch.load('data/weights/'+weight_file, map_location=self.device)
+        self.to(self.device).load_state_dict(ckpt['basic_state'],strict=False)
+        self.model.load_state_dict(ckpt['mamba_state'], strict=False)
         self.body_model = art.ParametricModel('models/SMPL_male.pkl', vert_mask=self.vi_mask, device=self.device)
         self.dynamics_optimizer = PhysicsOptimizer(debug=False, quiet=False)
         self.nd = NumericalDifferentiation(dt=1/60)
