@@ -73,7 +73,7 @@ models/plane.urdf
 
 ## Download Pretrained Models
 
-- Student model: download from [here](https://github.com/HanShijia999/MIP/releases/download/V1.0.0/dipimu.pt)  
+- Student model: download from [here](https://github.com/HanShijia999/MIP/releases/download/V1.0.0/MIP_weights.pt)  
   Place to:
   ```bash
   data/weights/MIP_weights.pt
