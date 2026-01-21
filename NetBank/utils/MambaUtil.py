@@ -28,7 +28,7 @@ class  VanilaMambaSelectAttenPatchWithLayerOutput(nn.Module):
             norm_layer: (nn.Module): normalization layer
         """
         super().__init__()
-        print('\n==============\na boring try...\n==============\n')
+
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         embed_dim = embed_dim_ratio   #### temporal embed_dim is num_joints * spatial embedding dim ratio
         out_dim = 3     #### output dimension is num_joints * 3
