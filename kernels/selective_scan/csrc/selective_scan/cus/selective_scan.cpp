@@ -32,6 +32,16 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream);
 
 template <int knrows, typename input_t, typename weight_t>
 void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream);
+template<typename input_t, typename weight_t>
+void selective_scan_step_cuda(
+    const at::Tensor &u, const at::Tensor &delta,
+    const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
+    const c10::optional<at::Tensor> &D_,
+    const c10::optional<at::Tensor> &delta_bias_,
+    at::Tensor &state,  // in-place
+    at::Tensor &out,
+    bool delta_softplus,
+    cudaStream_t stream);
 
 void set_ssm_params_fwd(SSMParamsBase &params,
                         // sizes
@@ -229,7 +239,8 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    // at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard(u.device());
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<1, input_t, weight_t>(params, stream);
@@ -347,8 +358,61 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias};
     return result;
 }
+at::Tensor selective_scan_step(
+    const at::Tensor &u, const at::Tensor &delta,
+    const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
+    const c10::optional<at::Tensor> &D_,
+    const c10::optional<at::Tensor> &delta_bias_,
+    at::Tensor state,
+    bool delta_softplus) {
 
+    auto input_type = u.scalar_type();
+    TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
+    TORCH_CHECK(A.scalar_type() == at::ScalarType::Float);
+    TORCH_CHECK(delta.scalar_type() == input_type);
+    TORCH_CHECK(B.scalar_type() == input_type);
+    TORCH_CHECK(C.scalar_type() == input_type);
+
+    TORCH_CHECK(u.is_cuda() && delta.is_cuda() && A.is_cuda() && B.is_cuda() && C.is_cuda() && state.is_cuda());
+    TORCH_CHECK(state.scalar_type() == at::ScalarType::Float);  // 强烈建议 float32 state
+
+    const int Bsz = u.size(0);
+    const int dim = u.size(1);
+    const int dstate = A.size(1);
+    const int ngroups = B.size(1);
+
+    TORCH_CHECK(u.dim() == 2 && delta.dim() == 2);
+    TORCH_CHECK(A.sizes() == torch::IntArrayRef({dim, dstate}));
+    TORCH_CHECK(B.sizes() == torch::IntArrayRef({Bsz, ngroups, dstate}));
+    TORCH_CHECK(C.sizes() == torch::IntArrayRef({Bsz, ngroups, dstate}));
+    TORCH_CHECK(state.sizes() == torch::IntArrayRef({Bsz, dim, dstate}));
+    TORCH_CHECK(dim % ngroups == 0);
+
+    if (D_.has_value()) {
+        auto D = D_.value();
+        TORCH_CHECK(D.is_cuda() && D.scalar_type() == at::ScalarType::Float);
+        TORCH_CHECK(D.sizes() == torch::IntArrayRef({dim}));
+    }
+    if (delta_bias_.has_value()) {
+        auto db = delta_bias_.value();
+        TORCH_CHECK(db.is_cuda() && db.scalar_type() == at::ScalarType::Float);
+        TORCH_CHECK(db.sizes() == torch::IntArrayRef({dim}));
+    }
+
+    auto out = torch::empty_like(u);
+
+    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+    DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_step", [&] {
+        selective_scan_step_cuda<input_t, float>(
+            u, delta, A, B, C, D_, delta_bias_, state, out, delta_softplus, stream);
+    });
+
+    return out;
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fwd", &selective_scan_fwd, "Selective scan forward");
     m.def("bwd", &selective_scan_bwd, "Selective scan backward");
+    m.def("step", &selective_scan_step, "Selective scan step (in-place state)");
 }

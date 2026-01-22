@@ -148,6 +148,11 @@ class CrossScan_plus_uni(torch.autograd.Function):
         y = ys.view(B, C, H, W) # Change to (B, C, H, W)
         return y
     
+def selective_scan_step(u_t, delta_t, A, B_t, C_t, state, D=None, delta_bias=None, delta_softplus=True):
+        # u_t: [B,D], delta_t: [B,D]
+        # B_t/C_t: [B,G,dstate]
+        # state: [B,D,dstate] float32 (in-place)
+        return selective_scan_cuda_core.step(u_t, delta_t, A, B_t, C_t, D, delta_bias, state, delta_softplus)
 
 class SelectiveScanCore(torch.autograd.Function):
     @staticmethod

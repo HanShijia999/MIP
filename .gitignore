@@ -2,3 +2,5 @@ NetBank/weights/*
 data/*
 models/
 __pycache__/
+kernels/selective_scan/build
+kernels/selective_scan/selective_scan.egg-info

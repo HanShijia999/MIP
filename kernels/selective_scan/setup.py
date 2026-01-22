@@ -79,6 +79,7 @@ def get_ext():
             "csrc/selective_scan/cus/selective_scan.cpp",
             "csrc/selective_scan/cus/selective_scan_core_fwd.cu",
             "csrc/selective_scan/cus/selective_scan_core_bwd.cu",
+            "csrc/selective_scan/cus/selective_scan_step.cu",
         ],
         
     )
