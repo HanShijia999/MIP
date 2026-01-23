@@ -98,7 +98,7 @@ class DuMambaUniSelect(torch.nn.Module):
         self.dynamics_optimizer.reset_states()
         self.nd.reset()
         self.nd2.reset()
-        self.buffer=[]
+        self.counter=0
 
 
     @torch.no_grad()
@@ -192,5 +192,90 @@ class DuMambaUniSelect(torch.nn.Module):
         pose_opt = torch.stack(pose_opt,dim=0)
         return pose_opt
 
+    @torch.no_grad()
+    def window_end(self):
+        self.counter=0
+        # print(self.pRB_dyn.shape)#[5,64]
+        self.pRB_dyn = self.model.makeQuery().squeeze(0).squeeze(0)
+        self.model.restWindow()
 
+    @torch.no_grad()
+    def forward_frame(self, a, w, R):
+        RIR = R[5]
+        aRB_sta = RIR.t().matmul(a.view(6, 3, 1))
+        wRB_sta = RIR.t().matmul(w.view(6, 3, 1))
+        RRB_sta = RIR.t().matmul(R)
+        wRR_sta = wRB_sta[5:]
+        wRB_sta = wRB_sta[:5]
+
+        RRB_dyn = RRB_sta[:5]
+        aRB_dyn = aRB_sta[:5] - aRB_sta[5:]
+        
+        pRB_dyn=self.pRB_dyn
+        x = torch.cat((aRB_dyn.flatten(1) / 20, RRB_dyn.flatten(1), wRB_sta.flatten(1), pRB_dyn),dim=1).unsqueeze(0) #[1,seq, 5, 18]
+        out = self.model.step(x, self.counter)
+        x = torch.cat((RRB_dyn.view(1, -1), out.view(1,-1)), dim=1) #[seq,batch=1, 60]
+
+        self.counter+=1
+        if self.counter==200:
+            self.window_end()
+
+        # IK-s1
+        x, self.ik1hc = self.iknet_net1.rnn(x.unsqueeze(0), self.ik1hc)
+        x = self.iknet_net1.linear2(x.squeeze(0))
+        jpos = x.view(-1, 23, 3)
+        # jpos may be the all joints position and etc
+        # total SMPL joints are 24
+        # one joint is missing.
+
+        # IK-s2
+        x = torch.cat((RRB_dyn.view(1, -1), jpos.flatten(1)), dim=1)
+        x, self.ik2hc = self.iknet_net2.rnn(x.unsqueeze(0), self.ik2hc)
+        x = self.iknet_net2.linear2(x.squeeze(0))
+        # may be the orientations of all joints
+        # x.shape = [1, 90], meaning [1, 15, 6]
+        # then use r6d_to_rotation_matrix() to make it to [1, 15, 3, 3]
+        # subset of 24 joints
+
+        # get pose estimation
+        reduced_glb_pose = art.math.r6d_to_rotation_matrix(x).view(1, 15, 3, 3)
+        glb_pose = torch.eye(3, device=self.device).repeat(1, 24, 1, 1)
+        glb_pose[:, self.ji_reduced] = reduced_glb_pose
+        pose = self.body_model.inverse_kinematics_R(glb_pose).view(24, 3, 3)
+        pose[self.ji_ignored] = torch.eye(3, device=self.device)
+        pose[0] = RIR
+        return pose.cpu()
+        joint = self.body_model.forward_kinematics(pose.view(1, 24, 3, 3).to(self.device))[1].view(24, 3)
+        # the joint position calculated with rotations
+        aj = joint[1:].mm(RIR)
+        # aj     : location of joints in root frame
+        # aRB_sta: raw acceleration in root frame
+        # RRB_sta: raw rotations in root frame
+        # wRR_sta: raw angular velocity in root frame
+        imu = torch.cat((aRB_sta.ravel() / 20, RRB_sta.ravel(), wRR_sta.ravel() / 4, aj.ravel()))
+
+        # VR-s1
+        x, self.vr1hc = self.vrnet_net1.rnn(imu.unsqueeze(0), self.vr1hc)
+        x = self.vrnet_net1.linear2(x.squeeze(0))
+        av = x.view(24, 3) * 2
+        # velocities in root frame
+        # global motion estimator
+
+        # VR-s2
+        x, self.vr2hc = self.vrnet_net2.rnn(imu.unsqueeze(0), self.vr2hc)
+        x = self.vrnet_net2.linear2(x.squeeze(0))
+        c = x.view(2)
+        # ground contact probability
+
+        # physics-based optimization
+        av = av.mm(RIR.t())
+        # pose: smpl pose
+        # av: all joint velocities in global frame
+        # c: ground contact probability
+        # a: raw acceleration from IMU in global frame
+        pose_opt, tran_opt = self.dynamics_optimizer.optimize_frame(pose.cpu(), av.cpu(), c.cpu(), a.cpu(), return_grf=False)
+        # self.pRB_dyn=self.forward_kinematics(pose_opt, tran_opt)
+
+        # return pose_opt.cpu(), tran_opt.cpu()
+        return pose_opt.cpu()
 

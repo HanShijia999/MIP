@@ -89,33 +89,27 @@ class  VanilaMambaSelectAttenPatchWithLayerOutput(nn.Module):
         x = self.pos_drop(x)
         x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
         blk = self.TTEblocks[0]
-        x, fineX, trendX = blk(x)
+        x = blk(x)
         # x = checkpoint(blk, x)  # Use checkpointing to save memory
 
         x = self.Temporal_norm(x)
-        return x, fineX, trendX
+        return x
 
 
     def ST_foward(self, x):
         assert len(x.shape)==4, "shape is equal to 4"
         b, f, n, cw = x.shape
-        
-        fineXs = []
-        trendXs = []
-
         for i in range(1, self.block_depth):
 
             tteblock = self.TTEblocks[i]
 
-            xT,fineX, trendX = tteblock(x)
+            xT = tteblock(x)
             # x = checkpoint(tteblock, x)  # Use checkpointing to save memory
             xT = self.Temporal_norm(xT)
-            fineXs.append(fineX)
-            trendXs.append(trendX)
             
             x = xT
         
-        return x, fineXs, trendXs
+        return x
 
     def make_query(self, chosen_frames, last_frame, mask_valid=None, attn_drop=0, out_drop=0):
         K = self.k_Project(chosen_frames)   # [B, k, n, d_k]
@@ -138,19 +132,57 @@ class  VanilaMambaSelectAttenPatchWithLayerOutput(nn.Module):
         
         x = self.Spatial_patch_to_embedding(x)
         
-        xT, fineX, trendX = self.TTE_foward(x)
+        xT = self.TTE_foward(x)
         x=xT
         
-        x, fineXs, trendXs = self.ST_foward(x)
+        x = self.ST_foward(x)
         y = self.head(x)
         y = y.view(b, f, n, -1)
-        fineXs.insert(0, fineX)
-        trendXs.insert(0, trendX)
-        fineXs = torch.stack(fineXs, dim=1).squeeze(0)  # [B, depth, F, N, D]
-        trendXs = torch.stack(trendXs, dim=1).squeeze(0)  # [B, depth, F, N, D]
 
         if with_entropy:
             return y, None, x, None
         else:
-            return y, [fineXs,trendXs], x   # [b, f, n, out], [b, top_k, n, d], [b, f, n, d]
+            return y, None, x   # [b, f, n, out], [b, top_k, n, d], [b, f, n, d]
+
+    def TTE_foward_step(self, x, counter):
+        # assert len(x.shape) == 3, "shape is equal to 3"
+        b, n, c  = x.shape
+        x = rearrange(x, 'b n cw -> (b n) cw')
+        x += self.Temporal_pos_embed[:,counter,:]
+        x = self.pos_drop(x)
+        x = rearrange(x, '(b n) cw -> b n cw', n=n)
+        blk = self.TTEblocks[0]
+        x  = blk.step(x)
+        # x = checkpoint(blk, x)  # Use checkpointing to save memory
+
+        x = self.Temporal_norm(x)
+        return x
+
+    
+    def ST_foward_step(self, x):
+        for i in range(1, self.block_depth):
+
+            tteblock = self.TTEblocks[i]
+
+            xT = tteblock.step(x)
+            # x = checkpoint(tteblock, x)  # Use checkpointing to save memory
+            xT = self.Temporal_norm(xT)
+            
+            x = xT
+        return x
+
+    def resetBuf(self):
+        for blk in self.TTEblocks:
+            blk.resetBuf()
+
+    def step(self, x, counter):
+        b, n, c = x.shape
+        x = self.Spatial_patch_to_embedding(x)
+        xT = self.TTE_foward_step(x,counter)
+        x=xT
+        x = self.ST_foward_step(x)
+        y = self.head(x)
+
+        return y, x
+
 

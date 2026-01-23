@@ -108,9 +108,70 @@ def compare_realimu(data, dataset_name='', evaluate_pose=True):
             print('')
     
 
+def compare_realimu_steps(data, dataset_name='', evaluate_pose=True, evaluate_tran=False):
+    print('======================= Testing on %s Real Dataset =======================' % dataset_name)
+    reduced_pose_evaluator = ReducedPoseEvaluator()
+    full_pose_evaluator = FullPoseEvaluator()
+    g = torch.tensor([0, -9.8, 0])
+    nets = {
+        'MPI':DuMambaUniSelect(device=device).eval().to(device),
+        # 'PNP (Trans)':PNPT().eval().to(device),
+        # 'PNP (Mamba)':PNPM(weight_file='weightsMamba.pt',positional=True).eval().to(device),
+        # 'PNP (IKtransform)':PNPTIK().eval().to(device)
+    }
+    pose_errors = {k: [] for k in nets.keys()}
+
+    for seq_idx in range(len(data['pose'])):
+        aS = data['aS'][seq_idx]
+        wS = data['wS'][seq_idx]
+        mS = data['mS'][seq_idx]
+        RIS = data['RIS'][seq_idx]
+        RIM = data['RIM'][seq_idx]
+        RSB = data['RSB'][seq_idx]
+        tran = data['tran'][seq_idx]
+        pose = data['pose'][seq_idx]
+
+        RMB = RIM.transpose(1, 2).matmul(RIS).matmul(RSB).to(device)
+        aM = (RIM.transpose(1, 2).matmul(RIS).matmul(aS.unsqueeze(-1)).squeeze(-1) + g).to(device)
+        wM = RIM.transpose(1, 2).matmul(RIS).matmul(wS.unsqueeze(-1)).squeeze(-1).to(device)
+        pose = art.math.axis_angle_to_rotation_matrix(pose).view(-1, 24, 3, 3)
+
+        for net in nets.values():
+            net.rnn_initialize(pose[0])
+            net.pose_prediction = torch.zeros_like(pose)
+
+        for i in tqdm.trange(pose.shape[0]):
+            for net in nets.values():
+                net.pose_prediction[i] = net.forward_frame(aM[i], wM[i], RMB[i])
+
+
+
+
+
+        if evaluate_pose:
+            print('[%3d/%3d  pose]' % (seq_idx, len(data['pose'])), end='')
+            for k in nets.keys():
+                e1 = reduced_pose_evaluator(nets[k].pose_prediction, pose, )
+                e2 = full_pose_evaluator(nets[k].pose_prediction, pose,)
+                pose_errors[k].append(torch.cat((e1, e2), dim=0))
+                print('\t%s: %5.2fcm' % (k, pose_errors[k][-1][2, 0]), end=' ')  # joint position error
+            print('')
+
+    print('======================= Results on %s Real Dataset =======================' % dataset_name)
+    if evaluate_pose:
+        print('Metrics: ', reduced_pose_evaluator.names + full_pose_evaluator.names)
+        for net_name, error in pose_errors.items():
+            error = torch.stack(error).mean(dim=0)
+            print(net_name, end='\t')
+            for error_item in error:
+                print('%.2f±%.2f' % (error_item[0], error_item[1]), end='\t')  # mean & std
+            print('')
+    
+
 
 if __name__ == '__main__':
     torch.set_printoptions(sci_mode=False)
 
     data = torch.load('data/test_datasets/dipimu.pt')
-    compare_realimu(data, dataset_name='DIP_IMU')
+    # compare_realimu(data, dataset_name='DIP_IMU')
+    compare_realimu_steps(data, dataset_name='DIP_IMU')

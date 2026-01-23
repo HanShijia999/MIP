@@ -21,11 +21,11 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = True
 
 try:
-    from .csms6s import CrossScan, CrossMerge,CrossScan_basic, CrossMerge_basic,CrossMerge_plus_uni,CrossScan_plus_uni
+    from .csms6s import selective_scan_step,CrossScan, CrossMerge,CrossScan_basic, CrossMerge_basic,CrossMerge_plus_uni,CrossScan_plus_uni
     from .csms6s import SelectiveScanCore
 except:
 
-    from csms6s import CrossScan, CrossMerge
+    from csms6s import selective_scan_step,CrossScan, CrossMerge
     from csms6s import SelectiveScanCore
 
 # =====================================================
@@ -264,6 +264,8 @@ class BiSTSSM_v2:
         factory_kwargs = {"device": None, "dtype": None}
         super().__init__()
         d_inner = int(ssm_ratio * d_model)
+        self.d_inner=d_inner
+        self.joints=joints
         dt_rank = math.ceil(d_model / 16) if dt_rank == "auto" else dt_rank
         self.channel_first = channel_first
         self.with_dconv = d_conv > 1
@@ -320,6 +322,9 @@ class BiSTSSM_v2:
         self.in_proj = Linear(d_model, d_proj, bias=bias)
         self.act: nn.Module = act_layer()
         # conv =======================================
+        self.d_conv = d_conv
+        self.pad_t = (d_conv - 1)          # time causal left pad
+        self.pad_j = (d_conv - 1) // 2   
         if self.with_dconv:
             self.conv2d = nn.Conv2d(
                 in_channels=d_inner,
@@ -327,7 +332,7 @@ class BiSTSSM_v2:
                 groups=d_inner,
                 bias=conv_bias,
                 kernel_size=d_conv,
-                padding=((d_conv - 1),(d_conv - 1) // 2),
+                padding=0,#((d_conv - 1),(d_conv - 1) // 2),
                 **factory_kwargs,
             )
 
@@ -348,7 +353,8 @@ class BiSTSSM_v2:
         self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
         
         # self.cov1d 
-
+        self.d_state = d_state
+        self.dt_rank = dt_rank
         if initialize in ["v0"]:
             # dt proj ============================
             self.dt_projs = [
@@ -471,7 +477,6 @@ class BiSTSSM_v2:
         y = y.transpose(1,2)
         return (y.to(x.dtype) if to_dtype else y)
 
-    
     def forwardv2(self, x: torch.Tensor, **kwargs):
         x = self.in_proj(x)
         # print(self.disable_z, self.disable_z_act, self.channel_first, self.with_dconv)
@@ -484,12 +489,12 @@ class BiSTSSM_v2:
             if not self.disable_z_act:
                 z = self.act(z)
         if not self.channel_first:
-            # print(x.shape)
             x = x.permute(0, 3, 1, 2).contiguous()
         if self.with_dconv:
             #window size 5
-            x = self.conv2d(x) # (b, d, h, w)
-            x = x[:,:,:-4]
+            x = F.pad(x, (self.pad_j, self.pad_j, self.pad_t, 0))
+            x = self.conv2d(x)  # output time length == original T
+
         x = self.act(x)
         # torch.Size([1, 256, 243, 17])
         y = self.forward_core(x)
@@ -500,6 +505,192 @@ class BiSTSSM_v2:
         # print('this is forwardv2')
         return out
 
+
+    def forward_corev2_step_uni(
+        self,
+        x: torch.Tensor,
+        force_fp32: bool = False,
+        delta_softplus: bool = True,
+    ):
+        """
+        Streaming step for forward_type='v2_uniDirection' (K=1).
+        Input x: (B, C, 1, J)  where C = d_inner, J = joints
+        Output: (B, J, C)      single-frame output aligned with forward_corev2
+        """
+        assert x.dim() == 4, f"expect (B,C,1,J), got {x.shape}"
+        B, C, T1, J = x.shape
+        assert T1 == 1, "step expects a single time step (T=1)"
+        assert C == self.d_inner, f"C must be d_inner={self.d_inner}, got {C}"
+        assert J == self.joints, f"J must be joints={self.joints}, got {J}"
+
+        # ---------- match forward_corev2 pre-processing ----------
+        # forward_corev2 does: x = x.transpose(-1, -2)  (swap H/W)
+        # Here x is (B,C,1,J) -> (B,C,J,1)
+        x = x.transpose(-1, -2).contiguous()  # (B, C, J, 1)
+        _, _, H, W = x.shape                  # H=J, W=1
+        L = W                                 # L=1
+
+        # K = 1 for uniDirection
+        # CrossScan_plus_uni.forward flattens (C,H) into D_total and keeps W
+        xs = CrossScan_plus_uni.apply(x)      # (B, 1, C*H, W) = (B,1,D_total,1)
+        # D_total == d_inner * joints
+        D_total = xs.shape[2]
+        assert D_total == self.d_inner * self.joints
+
+        # ---------- projections (same math as forward_corev2, but L=1, K=1) ----------
+        x_proj_weight = self.x_proj_weight    # (K=1, Cproj, D_total)
+        dt_projs_weight = self.dt_projs_weight  # (K=1, D_total, R)
+        dt_projs_bias = self.dt_projs_bias      # (K=1, D_total)
+        A_logs = self.A_logs                  # (K*D_total, d_state) -> (D_total, d_state)
+        Ds = self.Ds                          # (K*D_total,) -> (D_total,)
+
+        R = self.dt_rank
+        N = self.d_state
+
+        # xs: (B,1,D_total,1), weight: (1, R+2N, D_total)
+        # => x_dbl: (B,1, R+2N, 1)
+        x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs, x_proj_weight)
+
+        # split along c-dim
+        dts, Bs, Cs = torch.split(x_dbl, [R, N, N], dim=2)   # each (B,1,*,1)
+
+        # dts: (B,1,R,1), dt_projs_weight: (1, D_total, R)
+        # => (B,1,D_total,1)
+        dts = torch.einsum("b k r l, k d r -> b k d l", dts, dt_projs_weight)
+
+        # ---------- squeeze L=1 to per-step vectors ----------
+        # u_t, delta_t: (B, D_total)
+        u_t = xs[:, 0, :, 0].contiguous()
+        delta_t = dts[:, 0, :, 0].contiguous()
+
+        # B_t, C_t: (B, K=1, N=d_state)
+        B_t = Bs[:, 0, :, 0].contiguous().unsqueeze(1)  # (B,1,N)
+        C_t = Cs[:, 0, :, 0].contiguous().unsqueeze(1)  # (B,1,N)
+
+        # params to fp32 if needed (match forward_corev2 style)
+        As = -torch.exp(A_logs.to(torch.float32))         # (D_total, d_state)
+        Ds_f = Ds.to(torch.float32)                       # (D_total,)
+        delta_bias = dt_projs_bias.view(-1).to(torch.float32)  # (D_total,)
+
+        if force_fp32:
+            u_t = u_t.to(torch.float32)
+            delta_t = delta_t.to(torch.float32)
+            B_t = B_t.to(torch.float32)
+            C_t = C_t.to(torch.float32)
+
+        # ---------- init / fetch state ----------
+        state = getattr(self, "_ssm_state", None)
+        if (state is None) or (state.shape[0] != B) or (state.shape[1] != D_total) or (state.shape[2] != N) or (state.device != u_t.device):
+            # keep state in fp32 for numerical stability
+            state = torch.zeros((B, D_total, N), device=u_t.device, dtype=torch.float32)
+            self._ssm_state = state
+
+        # ---------- selective scan step ----------
+        # returns y_t: (B, D_total) typically fp32
+        y_t = selective_scan_step(
+            u_t, delta_t, As, B_t, C_t, state,
+            D=Ds_f, delta_bias=delta_bias,
+            delta_softplus=delta_softplus
+        )
+
+        # ---------- reshape back (match forward_corev2 post-processing) ----------
+        # In forward_corev2:
+        # ys -> CrossMerge -> y.view(B,-1,H,W) -> if not channel_first -> (B,H,W,C) -> out_norm -> transpose(1,2)
+        y_t = y_t.to(x.dtype)  # cast back to model dtype (fp16/bf16 ok)
+
+        # (B, D_total) -> (B, d_inner, H, W=1)
+        y = y_t.view(B, self.d_inner, H, 1)  # (B, C, J, 1)
+
+        # channel_last path (your model uses channel_first=False)
+        # (B, C, J, 1) -> (B, J, 1, C)
+        y = y.permute(0, 2, 3, 1).contiguous()
+
+        # out_norm is LayerNorm(d_inner) when channel_first=False
+        y = self.out_norm(y)   # (B, J, 1, C)
+
+        # forward_corev2 ends with y = y.transpose(1,2)  -> (B, 1, J, C)
+        y = y.transpose(1, 2).contiguous()  # (B, 1, J, C)
+
+        # step returns single frame: (B, J, C)
+        return y[:, 0]
+
+    def step(self, x: torch.Tensor, **kwards):
+        """
+        x: (B, J, d_model)  —— 单帧输入
+        return: (B, J, d_model)
+        """
+        B, J, _ = x.shape
+
+        x = self.in_proj(x)
+        if not self.disable_z:
+            x, z = x.chunk(2, dim=-1)
+            if not self.disable_z_act:
+                z = self.act(z)
+
+        # ---- depthwise conv over (time, joint) ----
+        # convert to (B, C, 1, J)
+        if not self.channel_first:
+            # x is (B, J, C)
+            x_cf = x.transpose(1, 2).contiguous().unsqueeze(2)  # (B, C, 1, J)
+        else:
+            # if channel_first you need to define your single-frame format; most of your code is channel_last
+            raise NotImplementedError("step only implemented for channel_first=False")
+
+        if self.with_dconv:
+            buf = getattr(self, "_dconv_buf", None)
+            if (buf is None) :
+                # buffer holds last d_conv frames: (B, C, d_conv, J)
+                buf = torch.zeros((1, self.d_inner, self.d_conv, self.joints), device=x_cf.device, dtype=torch.float32)
+                self._dconv_buf = buf
+                self._dconv_inited = False
+
+            # init: keep zeros on history (causal zero state)
+            # if you want "replicate first frame" init, change below init logic.
+            if not getattr(self, "_dconv_inited", False):
+                # shift in current frame once
+                buf[:, :, :-1, :].zero_()
+                buf[:, :, -1, :].copy_(x_cf[:, :, 0, :])
+                self._dconv_inited = True
+            else:
+                buf[:, :, 0:-1, :].copy_(buf[:, :, 1:, :].clone())
+                buf[:, :, -1, :].copy_(x_cf[:, :, 0, :])
+
+            # pad and conv
+            u = F.pad(buf, (self.pad_j, self.pad_j, self.pad_t, 0))   # (B,C, d_conv+pad_t, J+2*pad_j)
+            u = self.conv2d(u)                                       # (B,C, d_conv, J)
+            # take the output corresponding to "current time" => last time index
+            x_cf = u[:, :, -1:, :]  # (B, C, 1, J)
+
+        x_cf = self.act(x_cf)
+
+        # ---- selective scan step (TODO: connect your selective_scan_step.cu) ----
+        # x_cf currently is (B, C, 1, J). forward_core wants a 4D tensor.
+        # In your forward_corev2, time is W after transpose(-1,-2). Right now time length is 1.
+        #
+        # You need a function that updates internal SSM state for one new timestep and returns y_t.
+        #
+        # Suggested API you implement in csms6s:
+        #   y = SelectiveScanCore.step(u_t, state, params...)  -> returns y_t and updates state in-place
+        #
+        # For now, I keep a placeholder that simply calls forward_core on length=1 (correct but slow).
+        # Replace this block with your true streaming selective scan step.
+        x_full = x_cf  # (B,C,1,J)
+        y = self.forward_corev2_step_uni(x_full, force_fp32=(not self.disable_force32))# <-- SLOW fallback; replace with real step kernel
+        # y should become (B, J, C) after forward_corev2 returns
+
+        y = self.out_act(y)
+        if not self.disable_z:
+            y = y * z
+        out = self.dropout(self.out_proj(y))
+        return out
+
+    def resetBuf(self):
+        # depthwise conv buffer + selective scan state
+        self._dconv_buf = None
+        self._dconv_inited = False
+        # 下面这些 state 你接 selective_scan_step 时会用到
+        self._ssm_state = None
+        self._ssm_inited = False
 
 
 class BiSTSSM(nn.Module, mamba_init, BiSTSSM_v2):
@@ -643,7 +834,7 @@ class BiSTSSMBlockUniPatch(nn.Module):
         x = self.norm_conv(x)  # LayerNorm(D)
         x = self.op2(x)
         return x
-
+    
     def _forward(self, input: torch.Tensor):
         x = input
         x1= self.op(self.norm(x))
@@ -653,10 +844,52 @@ class BiSTSSMBlockUniPatch(nn.Module):
         x = self.fusser(torch.cat([x1, x2], dim=-1))
         x = input + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        if self.output_layerWise:
-            return x, x1, x2
+        return x
+    
+    def patchOPStep(self, input):
+        # input: (B, J, D)
+        B, J, D = input.shape
+        x = rearrange(input, 'b j d -> b d j')  # (B, D, J)
+
+        buf = getattr(self, "_patch_buf", None)
+        inited = getattr(self, "_patch_buf_inited", False)
+
+        if (buf is None):
+            buf = torch.empty((B, D, 4, J), device=x.device, dtype=x.dtype)
+            self._patch_buf = buf
+            self._patch_buf_inited = False
+            inited = False
+
+        if not inited:
+            # forward 等价：左边 pad 3 个“第一帧”，并且当前也在 buffer 里
+            buf.copy_(x[:, :, None, :].expand(-1, -1, 4, -1))
+            self._patch_buf_inited = True
         else:
-            return x
+            buf[:, :, 0:3, :].copy_(buf[:, :, 1:4, :].clone())
+            buf[:, :, 3, :].copy_(x)
+
+        y = self.conv(buf)[:, :, -1, :]   # (B, D, J) 取当前时刻输出
+        y = self.convAct(y)
+        y = rearrange(y, 'b d j -> b j d')
+        y = self.norm_conv(y)
+        y = self.op2.step(y)
+        return y
+
+    def step(self, input: torch.Tensor):
+        # input: (B, J, D)
+        x = input
+        x1 = self.op.step(self.norm(x))
+        x2 = self.patchOPStep(self.norm(x))
+        x = self.fusser(torch.cat([x1, x2], dim=-1))
+        x = input + self.drop_path(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
+
+    def resetBuf(self):
+        self._patch_buf=None
+        self._patch_buf_inited=None
+        self.op.resetBuf()
+        self.op2.resetBuf()
 
     def forward(self, input: torch.Tensor):
         if self.use_checkpoint:
