@@ -40,7 +40,17 @@ Then install the selective scan kernel:
 cd kernels/selective_scan
 pip install -e .
 ```
+in win:
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.29
+set DISTUTILS_USE_SDK=1
+set MSSdk=1
+conda activate py38
 
+cd /d D:\work\MIP\kernels\selective_scan
+rmdir /s /q build
+rmdir /s /q selective_scan.egg-info
+
+pip install -e . > build_v142_real.log 2>&1
 ---
 
 ## Prepare SMPL Body Model
